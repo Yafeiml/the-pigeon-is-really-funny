@@ -1,0 +1,34 @@
+# The development folder also contains private references and retired prototypes.
+# Track only the inputs and tools for the current public release.
+/*
+!/.gitignore
+!/.gitattributes
+!/README.md
+!/README.zh-CN.md
+!/ARTWORK.md
+!/ARTWORK.zh-CN.md
+!/LICENSE
+!/THIRD-PARTY-NOTICES.txt
+!/Cargo.toml
+!/Cargo.lock
+!/build-release.ps1
+!/src/
+!/assets-2d/
+/assets-2d/*
+!/assets-2d/pigeon-2d-study.png
+!/assets-2d/rig/
+/assets-2d/rig/*
+!/assets-2d/rig/turn-views.png
+!/docs/
+/docs/*
+!/docs/pigeon.webp
+!/tools/
+/tools/*
+!/tools/animate_2d.py
+!/tools/cere_2d.py
+!/tools/export_poses.rs
+!/tools/peck_plumage.py
+!/tools/pigeon_blink.py
+!/tools/sprite_image.py
+!/tools/turn_2d.py
+**/__pycache__/
