@@ -24,7 +24,7 @@ The pigeon checks this repository's latest stable GitHub Release in the backgrou
 
 ## Build from source
 
-On Windows x64, install a current stable Rust toolchain with a Windows linker, Python with Pillow and NumPy, and PowerShell 7. From the repository root, run these commands in PowerShell. The Python environment is only used to generate the animation.
+On Windows x64, install a current stable Rust toolchain with MSVC and the Windows SDK, or MinGW with windres. You also need Python with Pillow and NumPy to generate the animation. From the repository root, run these commands in PowerShell 7.
 
 ```powershell
 python -m venv .venv

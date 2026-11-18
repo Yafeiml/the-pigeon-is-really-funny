@@ -8,6 +8,9 @@ The project distributes this character artwork and the animation scripts under t
 | --- | --- |
 | `assets-2d/pigeon-2d-study.png` | The project created this character sheet with an image generation tool. It contains standing, walking and pecking poses. Two images of a pigeon model served as references for anatomy and plumage. |
 | `assets-2d/rig/turn-views.png` | Three-quarter and front views of the same pigeon provide the key poses for turning. |
-| Windows animation and tray icon | The scripts use the two sheets to render 2,508 frames across the walk, low walk, settling, turning, looking and pecking sequences. The tray icon shows the same pigeon's head. |
+| Windows animation | The scripts use the two sheets to render 2,508 frames across the walk, low walk, settling, turning, looking and pecking sequences. |
+| [Pigeon icon](src/icons/pigeon.svg) | A hand-drawn front view of the head, beak and shoulders. The tray uses dark or light ink on a transparent background to match the taskbar. Explorer uses a neutral gray version. |
 
 Footage of real pigeons informed the gait and foraging animation. Rights to the reference photos, gallery images, model previews, videos and video stills remain with their respective owners. Those files are excluded from the source and executable. The animation can be rebuilt using the two sheets above.
+
+After editing the SVG, run `python tools/render_icons.py` with Pillow and resvg-py to regenerate the three Windows icon files.

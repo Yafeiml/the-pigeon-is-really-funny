@@ -23,7 +23,9 @@ use windows::{
 
 mod settings;
 mod size_slider;
+mod tray_icon;
 use settings::Settings;
+use tray_icon::TrayIcon;
 
 const CLASS: PCWSTR = w!("Pigeon.Native.Prototype");
 const BODY_CLASS: PCWSTR = w!("Pigeon.Native.Body");
@@ -36,7 +38,8 @@ const SIZE_MAX: u32 = 100;
 
 enum Event {
     Menu,
-    SystemLanguage,
+    SystemSettings,
+    TaskbarCreated,
     Size(u32),
     Down(POINT),
     Move(POINT),
@@ -97,7 +100,10 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                 return LRESULT(0);
             }
             WM_DISPLAYCHANGE | WM_DPICHANGED => enqueue(Event::Display),
-            WM_SETTINGCHANGE => enqueue(Event::SystemLanguage),
+            WM_SETTINGCHANGE | WM_THEMECHANGED | WM_SYSCOLORCHANGE => {
+                enqueue(Event::SystemSettings)
+            }
+            id if id >= 0xc000 && id == taskbar_created_message() => enqueue(Event::TaskbarCreated),
             WM_CLOSE => enqueue(Event::Close),
             WM_DESTROY => {
                 PostQuitMessage(0);
@@ -272,37 +278,57 @@ impl Graphics {
 
 struct Tray {
     data: NOTIFYICONDATAW,
+    icon: TrayIcon,
 }
+
+fn taskbar_created_message() -> u32 {
+    static MESSAGE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *MESSAGE.get_or_init(|| unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) })
+}
+
 impl Tray {
-    unsafe fn new(hwnd: HWND) -> Result<Self> {
+    fn new(hwnd: HWND) -> Result<Self> {
+        let icon = TrayIcon::current();
+        let mut tray = Self {
+            icon,
+            data: NOTIFYICONDATAW {
+                cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+                hWnd: hwnd,
+                uID: 1,
+                uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP,
+                uCallbackMessage: TRAY_MESSAGE,
+                hIcon: icon.load()?,
+                ..Default::default()
+            },
+        };
+        tray.set_tip();
+        tray.data.Anonymous.uVersion = NOTIFYICON_VERSION_4;
+        tray.register()?;
+        Ok(tray)
+    }
+
+    fn register(&self) -> Result<()> {
         unsafe {
-            #[repr(align(4))]
-            struct IconBytes([u8; include_bytes!("tray.png").len()]);
-            static ICON: IconBytes = IconBytes(*include_bytes!("tray.png"));
-            let icon = CreateIconFromResourceEx(
-                &ICON.0,
-                true,
-                0x30000,
-                GetSystemMetrics(SM_CXSMICON),
-                GetSystemMetrics(SM_CYSMICON),
-                LR_DEFAULTCOLOR,
-            )?;
-            let mut tray = Self {
-                data: NOTIFYICONDATAW {
-                    cbSize: size_of::<NOTIFYICONDATAW>() as u32,
-                    hWnd: hwnd,
-                    uID: 1,
-                    uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP,
-                    uCallbackMessage: TRAY_MESSAGE,
-                    hIcon: icon,
-                    ..Default::default()
-                },
-            };
-            tray.set_tip();
-            Shell_NotifyIconW(NIM_ADD, &tray.data).ok()?;
-            tray.data.Anonymous.uVersion = NOTIFYICON_VERSION_4;
-            Shell_NotifyIconW(NIM_SETVERSION, &tray.data).ok()?;
-            Ok(tray)
+            Shell_NotifyIconW(NIM_ADD, &self.data).ok()?;
+            Shell_NotifyIconW(NIM_SETVERSION, &self.data).ok()
+        }
+    }
+
+    fn refresh_icon(&mut self) {
+        let icon = TrayIcon::current();
+        if icon != self.icon
+            && let Ok(new) = icon.load()
+        {
+            unsafe {
+                let old = std::mem::replace(&mut self.data.hIcon, new);
+                if Shell_NotifyIconW(NIM_MODIFY, &self.data).as_bool() {
+                    self.icon = icon;
+                    let _ = DestroyIcon(old);
+                } else {
+                    self.data.hIcon = old;
+                    let _ = DestroyIcon(new);
+                }
+            }
         }
     }
 
@@ -759,6 +785,7 @@ unsafe fn run_inner() -> Result<()> {
             lpfnWndProc: Some(window_proc),
             hInstance: module.into(),
             lpszClassName: CLASS,
+            hIcon: LoadIconW(Some(module.into()), PCWSTR(std::ptr::without_provenance(1)))?,
             hCursor: LoadCursorW(None, IDC_ARROW)?,
             ..Default::default()
         };
@@ -913,10 +940,15 @@ unsafe fn run_inner() -> Result<()> {
                         save_after = Instant::now() + Duration::from_millis(250);
                     }
                     Event::Close => running = false,
-                    Event::SystemLanguage => {
+                    Event::SystemSettings => {
+                        app.tray.refresh_icon();
                         if app.settings.language == Language::System {
                             app.refresh_language();
                         }
+                    }
+                    Event::TaskbarCreated => {
+                        let _ = app.tray.register();
+                        app.tray.refresh_icon();
                     }
                     Event::Down(pt) => app.drag = Some((pt, app.motion.x(), app.motion.ground())),
                     Event::Move(pt) => {
@@ -934,6 +966,7 @@ unsafe fn run_inner() -> Result<()> {
                     }
                     Event::Up => app.drag = None,
                     Event::Display => {
+                        app.tray.refresh_icon();
                         app.graphics.last_presented = None;
                         let old_top = app.work.top;
                         (app.work, app.monitor_hz) = monitor_settings(hwnd)?;

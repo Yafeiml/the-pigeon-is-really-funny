@@ -12,6 +12,7 @@
 !/Cargo.toml
 !/Cargo.lock
 !/build-release.ps1
+!/build.rs
 !/src/
 !/assets-2d/
 /assets-2d/*
@@ -29,6 +30,7 @@
 !/tools/export_poses.rs
 !/tools/peck_plumage.py
 !/tools/pigeon_blink.py
+!/tools/render_icons.py
 !/tools/sprite_image.py
 !/tools/turn_2d.py
 **/__pycache__/

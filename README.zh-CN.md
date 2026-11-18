@@ -24,7 +24,7 @@
 
 ## 从源码构建
 
-在 Windows x64 上准备当前稳定版 Rust 和对应的 Windows 链接工具、Python、PowerShell 7。打开项目目录后运行以下命令。Python 环境中的 Pillow 和 NumPy 用于生成动画。
+在 Windows x64 上准备当前稳定版 Rust，搭配 MSVC 和 Windows SDK，或带有 windres 的 MinGW。动画生成需要 Python、Pillow 和 NumPy。打开项目目录后，在 PowerShell 7 中运行以下命令。
 
 ```powershell
 python -m venv .venv
