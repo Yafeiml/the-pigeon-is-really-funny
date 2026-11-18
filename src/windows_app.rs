@@ -1,4 +1,5 @@
 use crate::{
+    i18n::{Language, text},
     motion::{Mode, Motion},
     pigeon::{GROUND_Y, PigeonRenderer, SpriteView},
 };
@@ -17,7 +18,7 @@ use windows::{
         System::{Com::*, LibraryLoader::GetModuleHandleW, Threading::*},
         UI::{HiDpi::*, Input::KeyboardAndMouse::*, Shell::*, WindowsAndMessaging::*},
     },
-    core::{Interface, PCWSTR, Result, w},
+    core::{HSTRING, Interface, PCWSTR, Result, w},
 };
 
 mod settings;
@@ -26,7 +27,6 @@ use settings::Settings;
 
 const CLASS: PCWSTR = w!("Pigeon.Native.Prototype");
 const BODY_CLASS: PCWSTR = w!("Pigeon.Native.Body");
-const TITLE: PCWSTR = w!("鸽子 · The pigeon is really funny");
 const TRAY_MESSAGE: u32 = WM_APP + 1;
 const NIN_KEYSELECT: u32 = NIN_SELECT | NINF_KEY;
 const WIDTH: f32 = 320.0;
@@ -36,6 +36,7 @@ const SIZE_MAX: u32 = 100;
 
 enum Event {
     Menu,
+    SystemLanguage,
     Size(u32),
     Down(POINT),
     Move(POINT),
@@ -96,6 +97,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                 return LRESULT(0);
             }
             WM_DISPLAYCHANGE | WM_DPICHANGED => enqueue(Event::Display),
+            WM_SETTINGCHANGE => enqueue(Event::SystemLanguage),
             WM_CLOSE => enqueue(Event::Close),
             WM_DESTROY => {
                 PostQuitMessage(0);
@@ -157,8 +159,12 @@ impl Graphics {
             if create(D3D_DRIVER_TYPE_HARDWARE, &mut device).is_err() {
                 create(D3D_DRIVER_TYPE_WARP, &mut device)?;
             }
-            let device = device
-                .ok_or_else(|| windows::core::Error::new(E_FAIL, "D3D11 returned no device"))?;
+            let device = device.ok_or_else(|| {
+                windows::core::Error::new(
+                    E_FAIL,
+                    text("D3D11 returned no device", "D3D11 未返回图形设备"),
+                )
+            })?;
             let dxgi: IDXGIDevice = device.cast()?;
             let factory: IDXGIFactory2 = dxgi.GetAdapter()?.GetParent()?;
             let d2d_factory: ID2D1Factory1 =
@@ -252,7 +258,10 @@ impl Graphics {
                 let _ = DeleteObject(region.into());
                 return Err(windows::core::Error::new(
                     E_FAIL,
-                    "Cannot set pigeon input region",
+                    text(
+                        "Could not set the pigeon's input region",
+                        "无法设置鸽子的点击区域",
+                    ),
                 ));
             }
             self.last_presented = Some((view, origin));
@@ -289,14 +298,22 @@ impl Tray {
                     ..Default::default()
                 },
             };
-            let tip: Vec<u16> = "鸽子 · 右键调整大小、速度和活动模式"
-                .encode_utf16()
-                .collect();
-            tray.data.szTip[..tip.len()].copy_from_slice(&tip);
+            tray.set_tip();
             Shell_NotifyIconW(NIM_ADD, &tray.data).ok()?;
             tray.data.Anonymous.uVersion = NOTIFYICON_VERSION_4;
             Shell_NotifyIconW(NIM_SETVERSION, &tray.data).ok()?;
             Ok(tray)
+        }
+    }
+
+    fn set_tip(&mut self) {
+        let tip = text(
+            "Pigeon · Right-click for size, speed and activity",
+            "鸽子 · 右键调整大小、速度和活动模式",
+        );
+        self.data.szTip.fill(0);
+        for (dst, ch) in self.data.szTip.iter_mut().zip(tip.encode_utf16()) {
+            *dst = ch;
         }
     }
 }
@@ -313,7 +330,7 @@ struct App {
     hwnd: HWND,
     body: HWND,
     graphics: Graphics,
-    _tray: Tray,
+    tray: Tray,
     motion: Motion,
     base_scale: f32,
     settings: Settings,
@@ -333,6 +350,15 @@ impl Drop for App {
 }
 
 impl App {
+    unsafe fn refresh_language(&mut self) {
+        self.settings.language.apply();
+        self.tray.set_tip();
+        unsafe {
+            let _ = SetWindowTextW(self.hwnd, &HSTRING::from(app_title()));
+            let _ = Shell_NotifyIconW(NIM_MODIFY, &self.tray.data);
+            size_slider::refresh_language(self.hwnd);
+        }
+    }
     fn scale(&self) -> f32 {
         self.base_scale * (self.settings.size_percent as f32 / 100.0)
     }
@@ -428,50 +454,85 @@ impl App {
         unsafe {
             let menu = CreatePopupMenu()?;
             let build_menu = || -> Result<()> {
-                add_item(menu, 1, "自由活动", self.motion.mode() == Mode::Auto)?;
-                add_item(menu, 2, "原地休整", self.motion.mode() == Mode::Rest)?;
+                add_item(
+                    menu,
+                    1,
+                    text("Free roam", "自由活动"),
+                    self.motion.mode() == Mode::Auto,
+                )?;
+                add_item(
+                    menu,
+                    2,
+                    text("Rest in place", "原地休整"),
+                    self.motion.mode() == Mode::Rest,
+                )?;
                 AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null())?;
                 add_item(
                     menu,
                     34,
-                    &format!("大小 {}%…", self.settings.size_percent),
+                    &format!("{} {}%…", text("Size", "大小"), self.settings.size_percent),
                     false,
                 )?;
-                for (id, speed, label) in [
-                    (11, 1.0, "速度 1×"),
-                    (12, 1.5, "速度 1.5×"),
-                    (13, 2.0, "速度 2×"),
-                ] {
-                    add_item(menu, id, label, (self.motion.speed() - speed).abs() < 0.01)?;
+                for (id, speed) in [(11, 1.0), (12, 1.5), (13, 2.0)] {
+                    let label = format!("{} {speed}×", text("Speed", "速度"));
+                    add_item(menu, id, &label, (self.motion.speed() - speed).abs() < 0.01)?;
                 }
                 AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null())?;
                 let (limit, effective) = frame_rates(self.settings.fps, self.monitor_hz);
                 for (id, fps) in [(20, 60), (21, 120), (22, 144)] {
-                    let mut label = format!("帧率上限 {fps} FPS");
+                    let mut label = format!("{} {fps} FPS", text("Frame limit", "帧率上限"));
                     if fps == limit && effective < limit {
-                        label.push_str(&format!("（当前屏幕 {effective} Hz）"));
+                        label.push_str(&format!(
+                            " ({} {effective} Hz)",
+                            text("display", "当前屏幕")
+                        ));
                     }
                     add_item(menu, id, &label, fps == limit)?;
                 }
                 AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null())?;
-                add_item(menu, 30, "暂停", self.settings.paused)?;
+                add_item(menu, 30, text("Pause", "暂停"), self.settings.paused)?;
                 add_item(
                     menu,
                     31,
-                    "鼠标穿透（从托盘恢复）",
+                    text(
+                        "Click-through (restore from tray)",
+                        "鼠标穿透（从托盘恢复）",
+                    ),
                     self.settings.click_through,
                 )?;
-                add_item(menu, 32, "全屏应用时隐藏", self.settings.fullscreen)?;
-                add_item(menu, 33, "移回屏幕中央", false)?;
+                add_item(
+                    menu,
+                    32,
+                    text("Hide in full-screen apps", "全屏应用时隐藏"),
+                    self.settings.fullscreen,
+                )?;
+                add_item(
+                    menu,
+                    33,
+                    text("Move to screen center", "移回屏幕中央"),
+                    false,
+                )?;
                 AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null())?;
+                add_language_menu(menu, self.settings.language)?;
+                let startup = crate::autostart::enabled();
+                let label = if startup.is_ok() {
+                    text("Launch at sign-in", "开机自启")
+                } else {
+                    text("Launch at sign-in (unavailable)", "开机自启（不可用）")
+                };
+                add_item(menu, 36, label, startup.unwrap_or(false))?;
                 #[cfg(all(feature = "standalone", target_arch = "x86_64"))]
                 add_item(
                     menu,
                     35,
-                    concat!("检查更新（v", env!("CARGO_PKG_VERSION"), "）"),
+                    &format!(
+                        "{} (v{})",
+                        text("Check for updates", "检查更新"),
+                        env!("CARGO_PKG_VERSION")
+                    ),
                     false,
                 )?;
-                add_item(menu, 99, "退出鸽子", false)
+                add_item(menu, 99, text("Quit pigeon", "退出鸽子"), false)
             };
             if let Err(error) = build_menu() {
                 let _ = DestroyMenu(menu);
@@ -518,11 +579,56 @@ impl App {
                 }
                 #[cfg(all(feature = "standalone", target_arch = "x86_64"))]
                 35 => crate::updater::check_now(),
+                36 => {
+                    if let Err(error) = crate::autostart::enabled()
+                        .and_then(|enabled| crate::autostart::set_enabled(!enabled))
+                    {
+                        report_error(&format!(
+                            "{}\n{error}",
+                            text(
+                                "Could not change launch at sign-in.",
+                                "无法更改开机自启设置。"
+                            )
+                        ));
+                    }
+                }
+                40..=42 => {
+                    self.settings.language =
+                        [Language::System, Language::English, Language::Chinese]
+                            [(command - 40) as usize];
+                    self.refresh_language();
+                }
                 99 => return Ok(false),
                 _ => {}
             }
             Ok(true)
         }
+    }
+}
+
+fn app_title() -> &'static str {
+    text(
+        "The pigeon is really funny",
+        "鸽子 · The pigeon is really funny",
+    )
+}
+
+unsafe fn add_language_menu(menu: HMENU, selected: Language) -> Result<()> {
+    unsafe {
+        let languages = CreatePopupMenu()?;
+        let label = HSTRING::from(text("Language / 语言", "语言 / Language"));
+        if let Err(error) = AppendMenuW(menu, MF_POPUP, languages.0 as usize, &label) {
+            let _ = DestroyMenu(languages);
+            return Err(error);
+        }
+        for (id, lang, label) in [
+            (40, Language::System, text("Follow Windows", "跟随 Windows")),
+            (41, Language::English, "English"),
+            (42, Language::Chinese, "简体中文"),
+        ] {
+            add_item(languages, id, label, selected == lang)?;
+        }
+        Ok(())
     }
 }
 
@@ -637,18 +743,17 @@ unsafe fn run_inner() -> Result<()> {
             .position(|s| s == "--smoke-test")
             .and_then(|i| arguments.get(i + 1))
             .cloned();
-        let _instance = OwnedHandle(CreateMutexW(
-            None,
-            false,
-            if smoke.is_some() {
-                w!("Local\\Pigeon.Native.SmokeTest")
-            } else {
-                w!("Local\\Pigeon.Native.Prototype")
-            },
-        )?);
-        if GetLastError() == ERROR_ALREADY_EXISTS {
-            return Ok(());
-        }
+        // Diagnostic runs use their own defaults and never edit desktop preferences.
+        let settings_path = if inspect || smoke.is_some() {
+            None
+        } else {
+            Settings::path()
+        };
+        let mut settings = settings_path
+            .as_deref()
+            .map(Settings::load)
+            .unwrap_or_default();
+        settings.language.apply();
         let module = GetModuleHandleW(None)?;
         let class = WNDCLASSW {
             lpfnWndProc: Some(window_proc),
@@ -679,7 +784,7 @@ unsafe fn run_inner() -> Result<()> {
                     WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
                 },
             CLASS,
-            TITLE,
+            &HSTRING::from(app_title()),
             WS_POPUP,
             0,
             0,
@@ -720,16 +825,6 @@ unsafe fn run_inner() -> Result<()> {
             Some(module.into()),
             None,
         )?;
-        // Diagnostic runs use their own defaults and never edit desktop preferences.
-        let settings_path = if inspect || smoke.is_some() {
-            None
-        } else {
-            Settings::path()
-        };
-        let mut settings = settings_path
-            .as_deref()
-            .map(Settings::load)
-            .unwrap_or_default();
         if smoke.is_some() {
             settings.fps = Some(144);
         }
@@ -740,7 +835,7 @@ unsafe fn run_inner() -> Result<()> {
             hwnd,
             body,
             graphics,
-            _tray: tray,
+            tray,
             motion,
             base_scale: scale,
             settings,
@@ -818,6 +913,11 @@ unsafe fn run_inner() -> Result<()> {
                         save_after = Instant::now() + Duration::from_millis(250);
                     }
                     Event::Close => running = false,
+                    Event::SystemLanguage => {
+                        if app.settings.language == Language::System {
+                            app.refresh_language();
+                        }
+                    }
                     Event::Down(pt) => app.drag = Some((pt, app.motion.x(), app.motion.ground())),
                     Event::Move(pt) => {
                         if let Some((start, x, y)) = app.drag {
@@ -860,7 +960,8 @@ unsafe fn run_inner() -> Result<()> {
                     Err(error) => {
                         if !save_warning_shown {
                             report_error(&format!(
-                                "无法保存鸽子设置到 {}\n{error}",
+                                "{} {}\n{error}",
+                                text("Could not save pigeon settings to", "无法保存鸽子设置到"),
                                 path.display()
                             ));
                             save_warning_shown = true;
@@ -910,7 +1011,13 @@ unsafe fn run_inner() -> Result<()> {
                         app.motion.speed(),
                     );
                     std::fs::write(path, report).map_err(|e| {
-                        windows::core::Error::new(E_FAIL, format!("Cannot write diagnostics: {e}"))
+                        windows::core::Error::new(
+                            E_FAIL,
+                            format!(
+                                "{} {e}",
+                                text("Could not write diagnostics.", "无法写入诊断文件。")
+                            ),
+                        )
                     })?;
                     break;
                 }
@@ -996,9 +1103,19 @@ unsafe fn run_inner() -> Result<()> {
 }
 
 pub fn report_error(message: &str) {
-    let text: Vec<u16> = message.encode_utf16().chain(Some(0)).collect();
     unsafe {
-        MessageBoxW(None, PCWSTR(text.as_ptr()), TITLE, MB_OK | MB_ICONERROR);
+        MessageBoxW(
+            None,
+            &HSTRING::from(message),
+            &HSTRING::from(app_title()),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+}
+
+pub fn load_language() {
+    if let Some(path) = Settings::path() {
+        Settings::load(&path).language.apply();
     }
 }
 

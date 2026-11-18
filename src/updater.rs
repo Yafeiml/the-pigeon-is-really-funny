@@ -4,6 +4,7 @@ mod http;
 #[cfg(test)]
 mod tests;
 
+use crate::i18n::text;
 use semver::Version;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -12,12 +13,8 @@ use std::{
     ffi::OsString,
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
-    os::windows::{
-        fs::{MetadataExt, OpenOptionsExt},
-        process::CommandExt,
-    },
+    os::windows::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     sync::atomic::{AtomicBool, Ordering},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -27,7 +24,7 @@ use windows::{
         Storage::FileSystem::{REPLACE_FILE_FLAGS, ReplaceFileW},
         UI::WindowsAndMessaging::{MB_ICONINFORMATION, MB_OK, MessageBoxW},
     },
-    core::{HSTRING, w},
+    core::HSTRING,
 };
 
 const REPO: &str = "Yafeiml/the-pigeon-is-really-funny";
@@ -35,7 +32,12 @@ const ASSET: &str = "Pigeon-Windows-x64.exe";
 const BUILD: &str = env!("CARGO_PKG_VERSION");
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 const MAGIC: &str = "DesktopPigeon GitHub updater v1\n";
-const PENDING: &str = "新版已安装，下次启动鸽子时生效。";
+fn pending() -> &'static str {
+    text(
+        "The update is installed and will take effect next time you launch the pigeon.",
+        "新版已安装，下次启动鸽子时生效。",
+    )
+}
 static CHECKING: AtomicBool = AtomicBool::new(false);
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
@@ -54,44 +56,62 @@ struct Asset {
 fn release(metadata: &[u8], current: &Version) -> Result<Option<Asset>> {
     let doc: Value = serde_json::from_slice(metadata)?;
     if doc["draft"] != false || doc["prerelease"] != false {
-        return Err(invalid("发布版本状态异常").into());
+        return Err(invalid(text("Invalid release status.", "发布版本状态异常")).into());
     }
     let tag = doc["tag_name"]
         .as_str()
-        .ok_or_else(|| invalid("发布版本缺少标签"))?;
-    let version = Version::parse(
-        tag.strip_prefix('v')
-            .ok_or_else(|| invalid("发布标签需要 v 前缀"))?,
-    )?;
+        .ok_or_else(|| invalid(text("The release has no version tag.", "发布版本缺少标签")))?;
+    let version = Version::parse(tag.strip_prefix('v').ok_or_else(|| {
+        invalid(text(
+            "The release tag must start with v.",
+            "发布标签需要 v 前缀",
+        ))
+    })?)?;
     if !version.pre.is_empty() || !version.build.is_empty() {
-        return Err(invalid("发布标签需要稳定版本号").into());
+        return Err(invalid(text(
+            "The release tag must be a stable version.",
+            "发布标签需要稳定版本号",
+        ))
+        .into());
     }
     if version <= *current {
         return Ok(None);
     }
     let mut matches = doc["assets"]
         .as_array()
-        .ok_or_else(|| invalid("缺少发布文件"))?
+        .ok_or_else(|| invalid(text("The release has no assets.", "缺少发布文件")))?
         .iter()
         .filter(|item| item["name"] == ASSET);
-    let entry = matches
-        .next()
-        .ok_or_else(|| invalid("未找到 Windows x64 发布文件"))?;
+    let entry = matches.next().ok_or_else(|| {
+        invalid(text(
+            "The Windows x64 download is missing.",
+            "未找到 Windows x64 发布文件",
+        ))
+    })?;
     let url = format!("https://github.com/{REPO}/releases/download/{tag}/{ASSET}");
     let hash = entry["digest"]
         .as_str()
         .and_then(|s| s.strip_prefix("sha256:"))
         .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
-        .ok_or_else(|| invalid("发布文件缺少有效的 SHA-256 校验值"))?;
+        .ok_or_else(|| {
+            invalid(text(
+                "The download has no valid SHA-256 checksum.",
+                "发布文件缺少有效的 SHA-256 校验值",
+            ))
+        })?;
     let size = entry["size"]
         .as_u64()
         .filter(|n| (1..=512 * 1024 * 1024).contains(n))
-        .ok_or_else(|| invalid("发布文件大小异常"))?;
+        .ok_or_else(|| invalid(text("Invalid download size.", "发布文件大小异常")))?;
     if matches.next().is_some()
         || entry["state"] != "uploaded"
         || entry["browser_download_url"] != url
     {
-        return Err(invalid("发布文件来源或状态异常").into());
+        return Err(invalid(text(
+            "Unexpected download source or status.",
+            "发布文件来源或状态异常",
+        ))
+        .into());
     }
     Ok(Some(Asset {
         version,
@@ -113,42 +133,24 @@ fn copy_verified(mut from: impl Read, to: &mut File, asset: &Asset) -> Result<()
         }
         total += n as u64;
         if total > asset.size || started.elapsed() > Duration::from_secs(20 * 60) {
-            return Err(invalid("更新下载超出大小或时间限制").into());
+            return Err(invalid(text(
+                "The update exceeded the download size or time limit.",
+                "更新下载超出大小或时间限制",
+            ))
+            .into());
         }
         hash.update(&buf[..n]);
         to.write_all(&buf[..n])?;
     }
     if total != asset.size || format!("{:x}", hash.finalize()) != asset.hash {
-        return Err(invalid("更新文件大小或 SHA-256 校验失败").into());
+        return Err(invalid(text(
+            "The download failed its size or SHA-256 check.",
+            "更新文件大小或 SHA-256 校验失败",
+        ))
+        .into());
     }
     to.sync_all()?;
     Ok(())
-}
-
-fn probe(exe: &Path, version: &Version) -> Result<()> {
-    let mut process = Command::new(exe)
-        .arg("--verify-assets")
-        .arg(version.to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .creation_flags(0x08000000) // CREATE_NO_WINDOW
-        .spawn()?;
-    let start = Instant::now();
-    loop {
-        if let Some(status) = process.try_wait()? {
-            if status.success() {
-                return Ok(());
-            }
-            return Err(invalid("新版程序未通过启动及动画资源验证").into());
-        }
-        if start.elapsed() > Duration::from_secs(90) {
-            let _ = process.kill();
-            let _ = process.wait();
-            return Err(invalid("新版程序启动验证超时").into());
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
 }
 
 // A per-installation work directory on the same volume, with a no-sharing lock
@@ -160,7 +162,10 @@ struct Workspace {
 
 fn work_dir(exe: &Path) -> Result<PathBuf> {
     let mut name = OsString::from(".");
-    name.push(exe.file_name().ok_or_else(|| invalid("程序路径无效"))?);
+    name.push(
+        exe.file_name()
+            .ok_or_else(|| invalid(text("Invalid program location.", "程序路径无效")))?,
+    );
     name.push(".pigeon-update");
     Ok(exe.with_file_name(name))
 }
@@ -173,7 +178,11 @@ impl Workspace {
             Err(e) => return Err(e.into()),
         };
         if fs::symlink_metadata(&dir)?.file_attributes() & 0x400 != 0 {
-            return Err(invalid("更新工作目录是重解析点").into());
+            return Err(invalid(text(
+                "The update directory is a reparse point.",
+                "更新工作目录是重解析点",
+            ))
+            .into());
         }
         let mut lock = OpenOptions::new()
             .read(true)
@@ -188,7 +197,11 @@ impl Workspace {
             let mut marker = String::new();
             (&mut lock).take(128).read_to_string(&mut marker)?;
             if marker != MAGIC {
-                return Err(invalid("更新工作目录已被占用").into());
+                return Err(invalid(text(
+                    "The update directory is already in use.",
+                    "更新工作目录已被占用",
+                ))
+                .into());
             }
         }
         Ok(Self { dir, _lock: lock })
@@ -239,7 +252,11 @@ fn install(exe: &Path, source: impl Read, asset: &Asset) -> Result<()> {
     work.cleanup(BUILD)?;
     let previous = work.dir.join("previous.exe");
     if previous.try_exists()? {
-        return Err(invalid("上一版备份仍在使用，请重新启动鸽子").into());
+        return Err(invalid(text(
+            "The previous version is still in use. Restart the pigeon.",
+            "上一版备份仍在使用，请重新启动鸽子",
+        ))
+        .into());
     }
     let candidate = work.dir.join("incoming.exe");
     let result = (|| {
@@ -250,7 +267,16 @@ fn install(exe: &Path, source: impl Read, asset: &Asset) -> Result<()> {
             .open(&candidate)?;
         copy_verified(source, &mut file, asset)?;
         drop(file);
-        probe(&candidate, &asset.version)?;
+        crate::pigeon::verify_update(&candidate, &asset.version.to_string()).map_err(|e| {
+            invalid(format!(
+                "{} ({})",
+                text(
+                    "The downloaded executable or animation failed validation.",
+                    "下载的程序或动画未通过校验。"
+                ),
+                e.code()
+            ))
+        })?;
         let version_path = work.dir.join("version");
         if version_path.try_exists()? {
             fs::remove_file(&version_path)?;
@@ -266,7 +292,7 @@ fn install(exe: &Path, source: impl Read, asset: &Asset) -> Result<()> {
 
 fn check() -> Result<&'static str> {
     if INSTALLED.load(Ordering::Acquire) {
-        return Ok(PENDING);
+        return Ok(pending());
     }
     let api = format!("https://api.github.com/repos/{REPO}/releases/latest");
     let mut metadata = vec![];
@@ -275,23 +301,30 @@ fn check() -> Result<&'static str> {
         .take(LIMIT + 1)
         .read_to_end(&mut metadata)?;
     if metadata.len() as u64 > LIMIT {
-        return Err(invalid("发布信息过大").into());
+        return Err(invalid(text(
+            "The release information is too large.",
+            "发布信息过大",
+        ))
+        .into());
     }
     let Some(asset) = release(&metadata, &Version::parse(BUILD)?)? else {
-        return Ok("当前已经是最新稳定版。");
+        return Ok(text(
+            "You already have the latest stable version.",
+            "当前已经是最新稳定版。",
+        ));
     };
     let response = http::get(&asset.url, true)?;
     install(&std::env::current_exe()?, response, &asset)?;
     INSTALLED.store(true, Ordering::Release);
-    Ok(PENDING)
+    Ok(pending())
 }
 
-fn message(text: &str) {
+fn message(body: &str) {
     unsafe {
         MessageBoxW(
             None,
-            &HSTRING::from(text),
-            w!("鸽子更新"),
+            &HSTRING::from(body),
+            &HSTRING::from(text("Pigeon updates", "鸽子更新")),
             MB_OK | MB_ICONINFORMATION,
         );
     }
@@ -300,7 +333,10 @@ fn message(text: &str) {
 fn check_and_notify(manual: bool) {
     if CHECKING.swap(true, Ordering::AcqRel) {
         if manual {
-            message("正在检查更新。");
+            message(text(
+                "An update check is already in progress.",
+                "正在检查更新。",
+            ));
         }
         return;
     }
@@ -315,7 +351,10 @@ fn check_and_notify(manual: bool) {
     if manual {
         match result {
             Ok(text) => message(text),
-            Err(e) => message(&format!("更新未完成。\n{e}")),
+            Err(e) => message(&format!(
+                "{}\n{e}",
+                text("The update could not be completed.", "更新未完成。")
+            )),
         }
     }
 }

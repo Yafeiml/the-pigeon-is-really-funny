@@ -1,5 +1,5 @@
 use super::{SIZE_MAX, SIZE_MIN};
-use crate::motion::Mode;
+use crate::{i18n::Language, motion::Mode};
 use std::{
     env, fs, io,
     path::{Path, PathBuf},
@@ -7,6 +7,7 @@ use std::{
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Settings {
+    pub language: Language,
     pub size_percent: u32,
     pub mode: Mode,
     pub speed: f32,
@@ -19,6 +20,7 @@ pub(super) struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            language: Language::System,
             size_percent: SIZE_MAX,
             mode: Mode::Auto,
             speed: 1.0,
@@ -51,6 +53,11 @@ impl Settings {
             };
             let value = value.trim();
             match (key.trim(), value) {
+                ("language", _) => {
+                    if let Some(language) = Language::parse(value) {
+                        settings.language = language;
+                    }
+                }
                 ("size_percent", _) => {
                     if let Ok(percent @ SIZE_MIN..=SIZE_MAX) = value.parse() {
                         settings.size_percent = percent;
@@ -95,8 +102,13 @@ impl Settings {
             .fps
             .map_or_else(|| "auto".into(), |fps| fps.to_string());
         let contents = format!(
-            "size_percent={}\nmode={mode}\nspeed={}\nfps={fps}\npaused={}\nclick_through={}\nfullscreen={}\n",
-            self.size_percent, self.speed, self.paused, self.click_through, self.fullscreen,
+            "size_percent={}\nmode={mode}\nspeed={}\nfps={fps}\npaused={}\nclick_through={}\nfullscreen={}\nlanguage={}\n",
+            self.size_percent,
+            self.speed,
+            self.paused,
+            self.click_through,
+            self.fullscreen,
+            self.language.code(),
         );
         let temporary = path.with_extension("tmp");
         fs::write(&temporary, contents)?;
@@ -115,6 +127,7 @@ mod tests {
         let path = directory.join("settings.ini");
         assert_eq!(Settings::load(&path), Settings::default());
         let settings = Settings {
+            language: Language::English,
             size_percent: 73,
             mode: Mode::Rest,
             speed: 1.5,
@@ -134,7 +147,7 @@ mod tests {
     #[test]
     fn malformed_values_only_affect_their_own_setting() {
         let path = env::temp_dir().join(format!("pigeon-prefs-invalid-{}.ini", std::process::id()));
-        fs::write(&path, b"\xef\xbb\xbf size_percent=49\nmode=walk\nspeed=NaN\nfps=0\nclick_through=5\nfullscreen=\xff\npaused = true\r\nunknown=1\n").unwrap();
+        fs::write(&path, b"\xef\xbb\xbf size_percent=49\nmode=walk\nspeed=NaN\nfps=0\nclick_through=5\nfullscreen=\xff\npaused = true\r\nlanguage=unknown\nunknown=1\n").unwrap();
         assert_eq!(
             Settings::load(&path),
             Settings {
@@ -142,6 +155,17 @@ mod tests {
                 ..Settings::default()
             }
         );
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn existing_settings_without_language_follow_windows() {
+        let path = env::temp_dir().join(format!("pigeon-prefs-legacy-{}.ini", std::process::id()));
+        fs::write(&path, "mode=rest\nsize_percent=67\n").unwrap();
+        let old = Settings::load(&path);
+        assert_eq!(old.language, Language::System);
+        assert_eq!(old.mode, Mode::Rest);
+        assert_eq!(old.size_percent, 67);
         fs::remove_file(path).unwrap();
     }
 }

@@ -20,6 +20,9 @@ if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
     throw 'Generate the animation frames first with python tools/animate_2d.py.'
 }
 $clips = (Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json -AsHashtable).clips
+$metadata = & cargo metadata --manifest-path (Join-Path $PSScriptRoot 'Cargo.toml') --locked --no-deps --format-version 1 | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0) { throw 'Could not read the package version.' }
+$versionBytes = [Text.Encoding]::ASCII.GetBytes(($metadata.packages | Where-Object name -eq 'pigeon').version)
 & cargo build --manifest-path (Join-Path $PSScriptRoot 'Cargo.toml') --release --locked --features standalone --target-dir $target
 if ($LASTEXITCODE -ne 0) { throw 'Release build failed.' }
 $binary = Join-Path $target 'release/pigeon.exe'
@@ -61,8 +64,11 @@ try {
         $writer = [IO.BinaryWriter]::new($stream, [Text.Encoding]::UTF8, $true)
         try {
             foreach ($offset in $offsets) { $writer.Write($offset) }
-            $writer.Write([Text.Encoding]::ASCII.GetBytes('PIGNAPK1'))
+            $writer.Write($versionBytes)
+            $writer.Write([uint32]$versionBytes.Length)
+            $writer.Write([uint32]($offsets.Count - 1))
             $writer.Write([uint64]$start)
+            $writer.Write([Text.Encoding]::ASCII.GetBytes('PIGNAPK2'))
         } finally { $writer.Dispose() }
     } finally { $stream.Dispose() }
     $verify = Start-Process -FilePath $stage -ArgumentList '--verify-assets' -WorkingDirectory $directory -WindowStyle Hidden -Wait -PassThru

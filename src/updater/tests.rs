@@ -1,5 +1,9 @@
 use super::*;
 use serde_json::json;
+use std::{
+    os::windows::process::CommandExt,
+    process::{Command, Stdio},
+};
 use windows::Win32::System::Com::CoCreateGuid;
 
 #[test]
@@ -141,7 +145,7 @@ fn live_image_replacement_and_restart() {
         assert!(old.try_wait()?.is_none());
         let work = work_dir(&exe)?;
         assert_eq!(fs::read(work.join("previous.exe"))?, fs::read(&ping)?);
-        probe(&exe, &asset.version)?;
+        crate::pigeon::verify_update(&exe, &asset.version.to_string())?;
         Ok(())
     })();
     let _ = old.kill();
@@ -172,5 +176,5 @@ fn public_release_can_be_read_and_downloaded() {
     let mut file = File::create(&exe).unwrap();
     copy_verified(http::get(&asset.url, true).unwrap(), &mut file, &asset).unwrap();
     drop(file);
-    probe(&exe, &asset.version).unwrap();
+    crate::pigeon::verify_update(&exe, &asset.version.to_string()).unwrap();
 }

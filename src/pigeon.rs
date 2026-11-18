@@ -1,3 +1,4 @@
+use crate::i18n::text;
 #[cfg(not(feature = "standalone"))]
 use std::path::PathBuf;
 #[cfg(any(not(feature = "standalone"), test))]
@@ -80,12 +81,30 @@ impl PigeonRenderer {
     }
 
     pub fn new(context: &ID2D1DeviceContext) -> Result<Self> {
-        let executable = std::env::current_exe()
-            .map_err(|error| Error::new(E_FAIL, format!("Cannot locate pigeon assets: {error}")))?;
+        let executable = std::env::current_exe().map_err(|error| {
+            Error::new(
+                E_FAIL,
+                format!(
+                    "{}\n{error}",
+                    text(
+                        "Cannot locate the animation files.",
+                        "无法定位鸽子的动画文件。"
+                    )
+                ),
+            )
+        })?;
         #[cfg(not(feature = "standalone"))]
         let assets = executable
             .parent()
-            .ok_or_else(|| Error::new(E_FAIL, "The executable has no parent directory"))?
+            .ok_or_else(|| {
+                Error::new(
+                    E_FAIL,
+                    text(
+                        "The executable has no parent directory.",
+                        "找不到程序所在的目录。",
+                    ),
+                )
+            })?
             .join("assets");
         #[cfg(all(debug_assertions, feature = "painted", not(feature = "standalone")))]
         let assets = if assets.is_dir() {
@@ -192,7 +211,12 @@ fn decode_frame(factory: &IWICImagingFactory, path: &Path, pixels: &mut [u8]) ->
             .map_err(|error| {
                 Error::new(
                     error.code(),
-                    format!("Cannot load {}: {}", path.display(), error.message()),
+                    format!(
+                        "{} {}\n{}",
+                        text("Cannot load", "无法加载"),
+                        path.display(),
+                        error.message()
+                    ),
                 )
             })?;
         decode_pixels(factory, &decoder, pixels)
@@ -227,7 +251,9 @@ fn decode_pixels(
             return Err(Error::new(
                 E_INVALIDARG,
                 format!(
-                    "Invalid frame: expected {FRAME_WIDTH}x{FRAME_HEIGHT}, found {width}x{height}"
+                    "{} {FRAME_WIDTH}×{FRAME_HEIGHT}, {} {width}×{height}",
+                    text("Expected frame size", "预期画面尺寸"),
+                    text("found", "实际尺寸")
                 ),
             ));
         }
@@ -247,26 +273,28 @@ fn decode_pixels(
 
 #[cfg(feature = "standalone")]
 pub(crate) fn verify_embedded_assets() -> Result<()> {
+    verify_frames(packed::PackedFrames::open(&std::env::current_exe()?)?)
+}
+
+#[cfg(all(feature = "standalone", target_arch = "x86_64"))]
+pub(crate) fn verify_update(executable: &std::path::Path, version: &str) -> Result<()> {
+    verify_frames(packed::PackedFrames::for_version(executable, version)?)
+}
+
+#[cfg(feature = "standalone")]
+fn verify_frames(mut assets: packed::PackedFrames) -> Result<()> {
     use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
     unsafe {
         CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
     }
-    let check = || -> Result<()> {
-        let mut assets = packed::PackedFrames::open(&std::env::current_exe()?)?;
+    let mut check = || -> Result<()> {
         let factory =
             unsafe { CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)? };
         let mut pixels = vec![0; FRAME_BYTES];
-        for clip in packed::CLIPS {
-            for index in 0..crate::motion::sprite_frame_count(clip, true) {
-                decode_memory(&factory, assets.frame(clip, index)?, &mut pixels).map_err(
-                    |error| {
-                        Error::new(
-                            error.code(),
-                            format!("{clip}/{index:04}: {}", error.message()),
-                        )
-                    },
-                )?;
-            }
+        for index in 0..assets.len() {
+            decode_memory(&factory, assets.at(index)?, &mut pixels).map_err(|error| {
+                Error::new(error.code(), format!("{index:04}: {}", error.message()))
+            })?;
         }
         Ok(())
     };

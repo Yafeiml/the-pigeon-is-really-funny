@@ -12,14 +12,15 @@ A pigeon for your Windows desktop. Watch its head stay still for a beat as its b
 
 Save `Pigeon-Windows-x64.exe` in a folder you can write to and double-click it on Windows 10 or 11 (x64). The single file contains all six animation clips. The pigeon and a tray icon appear on your desktop.
 
-- Drag the bird to move it. Right-click its body or the tray icon to open the menu. The menu is currently in Simplified Chinese.
-- Choose **自由活动** to roam or **原地休整** to rest in place, look around and peck. Set size from 50–100% or choose 1×, 1.5× or 2× speed.
+- Drag the bird to move it. Right-click its body or the tray icon to open the menu. Under **Language**, choose **Follow Windows**, **English** or **简体中文**. The choice applies immediately and is saved. With **Follow Windows**, Chinese display languages use Simplified Chinese and all other languages use English.
+- Choose **Free roam** to explore or **Rest in place** to look around and peck. Set size from 50–100% or choose 1×, 1.5× or 2× speed.
+- Turn on **Launch at sign-in** to start the pigeon when you sign in to Windows. It is off by default. If you move or rename the EXE, enable it again from the new location. Opening the EXE again leaves the existing pigeon running.
 - Set a 60, 120 or 144 FPS cap. The display refresh rate limits the effective frame rate. Full-screen hiding and click-through are available from the same menu.
 - Your preferences are saved in `%LOCALAPPDATA%\DesktopPigeon\settings.ini`. If you used the folder-based prototype, exit it from the tray before launching this release. Your preferences carry over.
 
 ## Updates
 
-The pigeon checks this repository's latest stable GitHub Release in the background once a day. Choose **检查更新** in the tray to check now. It downloads a newer EXE, verifies its SHA-256, version and embedded animation, then replaces the file. The new version takes effect on your next launch. If GitHub is unreachable, the current pigeon keeps running.
+The pigeon checks this repository's latest stable GitHub Release in the background once a day. Choose **Check for updates** in the tray to check now. It downloads a newer EXE, verifies its SHA-256, version and embedded animation, then replaces the file. The new version takes effect on your next launch. If GitHub is unreachable, the current pigeon keeps running.
 
 ## Build from source
 

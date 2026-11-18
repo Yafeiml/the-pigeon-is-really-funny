@@ -1,4 +1,5 @@
 use super::{Result, invalid};
+use crate::i18n::text;
 use std::{ffi::c_void, io, ptr};
 use windows::{
     Win32::Networking::WinHttp::*,
@@ -34,10 +35,10 @@ pub(super) struct Response {
 fn secure_endpoint(url: &str) -> Result<(&str, &str)> {
     let authority = url
         .strip_prefix("https://")
-        .ok_or_else(|| invalid("更新地址需要 HTTPS"))?;
+        .ok_or_else(|| invalid(text("The update URL must use HTTPS.", "更新地址需要 HTTPS")))?;
     let (host, _) = authority
         .split_once('/')
-        .ok_or_else(|| invalid("更新地址缺少路径"))?;
+        .ok_or_else(|| invalid(text("The update URL has no path.", "更新地址缺少路径")))?;
     if !matches!(
         host,
         "api.github.com"
@@ -48,7 +49,11 @@ fn secure_endpoint(url: &str) -> Result<(&str, &str)> {
         .bytes()
         .any(|byte| byte.is_ascii_control() || matches!(byte, b'\\' | b'#' | b' '))
     {
-        return Err(invalid("更新地址不属于 GitHub 发布服务").into());
+        return Err(invalid(text(
+            "The update URL is outside GitHub Releases.",
+            "更新地址不属于 GitHub 发布服务",
+        ))
+        .into());
     }
     Ok((host, &authority[host.len()..]))
 }
@@ -104,7 +109,11 @@ pub(super) fn get(url: &str, asset: bool) -> Result<Response> {
                 });
             }
             if !asset || !matches!(status, 301 | 302 | 303 | 307 | 308) || hop == 4 {
-                return Err(invalid(format!("GitHub 返回 HTTP {status}")).into());
+                return Err(invalid(format!(
+                    "{} HTTP {status}",
+                    text("GitHub returned", "GitHub 返回")
+                ))
+                .into());
             }
             let mut location = [0u16; 8192];
             let mut bytes = size_of_val(&location) as u32;
@@ -123,7 +132,11 @@ pub(super) fn get(url: &str, asset: bool) -> Result<Response> {
                 host,
                 "release-assets.githubusercontent.com" | "objects.githubusercontent.com"
             ) {
-                return Err(invalid("发布文件的跳转地址异常").into());
+                return Err(invalid(text(
+                    "Unexpected download redirect.",
+                    "发布文件的跳转地址异常",
+                ))
+                .into());
             }
             url = redirect;
         }

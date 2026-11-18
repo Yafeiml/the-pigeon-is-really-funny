@@ -1,4 +1,5 @@
 use super::{Event, SIZE_MAX, SIZE_MIN, enqueue};
+use crate::i18n::text;
 use windows::{
     Win32::{
         Foundation::*,
@@ -13,7 +14,27 @@ const CLASS: windows::core::PCWSTR = w!("Pigeon.Native.SizeSlider");
 const TBM_GETPOS: u32 = WM_USER;
 
 fn title(percent: u32) -> HSTRING {
-    format!("鸽子大小 · {percent}%").into()
+    format!("{} · {percent}%", slider_name()).into()
+}
+
+fn slider_name() -> &'static str {
+    text("Pigeon size", "鸽子大小")
+}
+
+pub(super) unsafe fn refresh_language(owner: HWND) {
+    unsafe {
+        let mut previous = None;
+        while let Ok(panel) = FindWindowExW(None, previous, CLASS, None) {
+            previous = Some(panel);
+            if GetWindow(panel, GW_OWNER).ok() == Some(owner)
+                && let Ok(slider) = GetWindow(panel, GW_CHILD)
+            {
+                let percent = SendMessageW(slider, TBM_GETPOS, None, None).0 as u32;
+                let _ = SetWindowTextW(panel, &title(percent));
+                let _ = SetWindowTextW(slider, &HSTRING::from(slider_name()));
+            }
+        }
+    }
 }
 
 unsafe extern "system" fn slider_keys(
@@ -152,7 +173,7 @@ fn create(owner: HWND, anchor: POINT, percent: u32) -> Result<(HWND, HWND)> {
             let slider = CreateWindowExW(
                 WINDOW_EX_STYLE(0),
                 TRACKBAR_CLASSW,
-                w!("鸽子大小"),
+                &HSTRING::from(slider_name()),
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(TBS_AUTOTICKS),
                 px(8),
                 px(5),
