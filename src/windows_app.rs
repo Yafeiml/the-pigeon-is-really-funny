@@ -105,6 +105,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                 return LRESULT(0);
             }
             WM_DISPLAYCHANGE | WM_DPICHANGED => enqueue(Event::Display),
+            WM_SETTINGCHANGE if wp.0 == SPI_SETWORKAREA.0 as usize => enqueue(Event::Display),
             WM_SETTINGCHANGE | WM_THEMECHANGED | WM_SYSCOLORCHANGE => {
                 enqueue(Event::SystemSettings)
             }
@@ -413,15 +414,12 @@ impl App {
     fn bound_width(&self) -> f32 {
         (self.row.1 - self.row.0) as f32 / self.scale()
     }
-    fn bound_height(&self) -> f32 {
-        ((self.screen.rect.bottom - 1) as f32 - self.screen.top(GROUND_Y * self.scale()))
-            / self.scale()
-    }
     fn anchor(&self) -> (f32, f32) {
         let scale = self.scale();
+        let (top, bottom) = self.screen.vertical(scale);
         (
             self.row.0 as f32 + self.motion.x() * scale,
-            self.screen.top(GROUND_Y * scale) + self.motion.ground() * scale,
+            (top + self.motion.ground() * scale).min(bottom),
         )
     }
     fn place(&mut self, screen: Screen, (x, y): (f32, f32), wrap_x: bool) {
@@ -430,9 +428,9 @@ impl App {
         }
         self.screen = screen;
         let scale = self.scale();
-        let top = screen.top(GROUND_Y * scale);
-        let y = y.clamp(top, (screen.rect.bottom - 1) as f32);
-        self.row = screens::row(&self.screens, screen, y, GROUND_Y * scale);
+        let (top, bottom) = screen.vertical(scale);
+        let y = y.clamp(top, bottom);
+        self.row = screens::row(&self.screens, screen, y, scale);
         let width = self.bound_width();
         let x = (x - self.row.0 as f32) / scale;
         self.motion.set_x(if wrap_x {
@@ -441,7 +439,7 @@ impl App {
             x.clamp(0.0, width)
         });
         self.motion
-            .set_ground((y - top) / scale, self.bound_height());
+            .set_ground((y - top) / scale, (bottom - top) / scale);
     }
     fn follow_screen(&mut self) {
         if self.screens.len() == 1 {
@@ -450,19 +448,19 @@ impl App {
         let (x, y) = self.anchor();
         // While leaving the outer edge, keep using the display the bird is leaving or entering.
         let probe = x.clamp(self.row.0 as f32, (self.row.1 - 1) as f32);
-        let top_margin = GROUND_Y * self.scale();
+        let scale = self.scale();
         let screen = self
             .screens
             .iter()
             .copied()
             .find(|screen| {
-                screen.visible_at(y, top_margin)
-                    && probe >= screen.rect.left as f32
-                    && probe < screen.rect.right as f32
+                screen.visible_at(y, scale)
+                    && probe >= screen.work.left as f32
+                    && probe < screen.work.right as f32
             })
             .unwrap_or(self.screen);
         if screen.monitor != self.screen.monitor
-            || screens::row(&self.screens, screen, y, top_margin) != self.row
+            || screens::row(&self.screens, screen, y, scale) != self.row
         {
             self.place(screen, (x, y), false);
         }
@@ -536,12 +534,13 @@ impl App {
                     let _ = ShowWindow(wrapped.body, SW_HIDE);
                 }
             }
-            // Windows clips to the physical screen automatically on a single display.
-            // On staggered displays, a wing can overhang the lane at a different height.
-            if self.screens.len() > 1 || self.clips != [None; 2] {
+            // Use the native screen edge unless a taskbar or a staggered monitor needs a clip.
+            let clip_to_row = self.screens.len() > 1
+                || self.row != (self.screen.rect.left, self.screen.rect.right);
+            if clip_to_row || self.clips != [None; 2] {
                 let width = (WIDTH * self.base_scale) as i32;
                 let height = (HEIGHT * self.base_scale) as i32;
-                let clips = if self.screens.len() > 1 {
+                let clips = if clip_to_row {
                     [
                         wrap::clip_x(x, width, self.row),
                         wrapped_x.and_then(|x| wrap::clip_x(x, width, self.row)),
@@ -989,7 +988,7 @@ unsafe fn run_inner() -> Result<()> {
             settings,
             screens,
             screen,
-            row: (screen.rect.left, screen.rect.right),
+            row: (screen.work.left, screen.work.right),
             monitor_hz: screen.refresh_rate(),
             hidden: settings.fullscreen && fullscreen_on_monitor(hwnd, screen),
             drag: None,

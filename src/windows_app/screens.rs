@@ -1,19 +1,27 @@
 use super::*;
 use windows::core::BOOL;
 
+// Includes a pixel of clearance around all baked poses, even looking up and turning.
+const HEAD_CLEARANCE: f32 = 155.0;
+const FEET_CLEARANCE: f32 = 5.0;
+
 #[derive(Clone, Copy)]
 pub(super) struct Screen {
     pub monitor: HMONITOR,
     pub rect: RECT,
+    pub work: RECT,
 }
 
 impl Screen {
-    pub fn visible_at(self, feet_y: f32, top_margin: f32) -> bool {
-        feet_y >= self.top(top_margin) && feet_y < self.rect.bottom as f32
+    pub fn visible_at(self, feet_y: f32, scale: f32) -> bool {
+        let (top, bottom) = self.vertical(scale);
+        (top..=bottom).contains(&feet_y)
     }
 
-    pub fn top(self, top_margin: f32) -> f32 {
-        (self.rect.top as f32 + top_margin).min((self.rect.bottom - 1) as f32)
+    pub fn vertical(self, scale: f32) -> (f32, f32) {
+        let work_top = self.work.top as f32;
+        let bottom = (self.work.bottom as f32 - FEET_CLEARANCE * scale).max(work_top);
+        ((work_top + HEAD_CLEARANCE * scale).min(bottom), bottom)
     }
 
     pub fn refresh_rate(self) -> Option<u32> {
@@ -47,9 +55,20 @@ pub(super) fn connected() -> Result<Vec<Screen>> {
         data: LPARAM,
     ) -> BOOL {
         unsafe {
+            let rect = *rect;
+            let mut info = MONITORINFO {
+                cbSize: size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            let work = if GetMonitorInfoW(monitor, &mut info).as_bool() {
+                info.rcWork
+            } else {
+                rect
+            };
             (*(data.0 as *mut Vec<Screen>)).push(Screen {
                 monitor,
-                rect: *rect,
+                rect,
+                work,
             })
         };
         true.into()
@@ -79,14 +98,14 @@ pub(super) fn nearest(screens: &[Screen], point: POINT) -> Screen {
         .unwrap_or(screens[0])
 }
 
-pub(super) fn row(screens: &[Screen], screen: Screen, y: f32, top_margin: f32) -> (i32, i32) {
-    let mut edges = (screen.rect.left, screen.rect.right);
+pub(super) fn row(screens: &[Screen], screen: Screen, y: f32, scale: f32) -> (i32, i32) {
+    let mut edges = (screen.work.left, screen.work.right);
     loop {
         let previous = edges;
-        for s in screens.iter().filter(|s| s.visible_at(y, top_margin)) {
+        for s in screens.iter().filter(|s| s.visible_at(y, scale)) {
             // Only traverse screens sharing this row without crossing an empty desktop area.
-            if s.rect.left <= edges.1 && s.rect.right >= edges.0 {
-                edges = (edges.0.min(s.rect.left), edges.1.max(s.rect.right));
+            if s.work.left <= edges.1 && s.work.right >= edges.0 {
+                edges = (edges.0.min(s.work.left), edges.1.max(s.work.right));
             }
         }
         if edges == previous {
@@ -100,15 +119,64 @@ mod tests {
     use super::*;
 
     #[test]
-    fn row_connects_adjacent_screens_but_excludes_gaps_and_stacked_screens() {
-        let screen = |left, top, right, bottom| Screen {
+    fn head_and_feet_fit_between_taskbars_at_each_size() {
+        let rect = RECT {
+            left: 0,
+            top: -240,
+            right: 2560,
+            bottom: 1360,
+        };
+        let stacked_bars = Screen {
             monitor: HMONITOR::default(),
-            rect: RECT {
+            rect,
+            work: RECT {
+                top: -180,
+                bottom: 1230,
+                ..rect
+            },
+        };
+        for scale in [0.8625, 1.725] {
+            let (top, bottom) = stacked_bars.vertical(scale);
+            assert!(top - 153.5 * scale >= stacked_bars.work.top as f32);
+            assert!(bottom + 4.0 * scale <= stacked_bars.work.bottom as f32);
+        }
+        let bare = Screen {
+            work: rect,
+            ..stacked_bars
+        };
+        assert_eq!(bare.vertical(1.0), (-85.0, 1355.0));
+    }
+
+    #[test]
+    fn a_side_taskbar_is_excluded_from_the_horizontal_wrap() {
+        let rect = RECT {
+            left: 0,
+            top: 0,
+            right: 2560,
+            bottom: 1600,
+        };
+        let screen = Screen {
+            monitor: HMONITOR::default(),
+            rect,
+            work: RECT { left: 56, ..rect },
+        };
+        assert_eq!(row(&[screen], screen, 800.0, 1.0), (56, 2560));
+    }
+
+    #[test]
+    fn row_connects_adjacent_screens_but_excludes_gaps_and_stacked_screens() {
+        let screen = |left, top, right, bottom| {
+            let rect = RECT {
                 left,
                 top,
                 right,
                 bottom,
-            },
+            };
+            Screen {
+                monitor: HMONITOR::default(),
+                rect,
+                work: rect,
+            }
         };
         let main = screen(0, 0, 2560, 1600);
         let adjacent = screen(-1920, 240, 0, 1320);
@@ -119,9 +187,9 @@ mod tests {
             screen(-3200, 0, -1920, 1024),
             main,
         ];
-        assert_eq!(row(&layout, main, 500.0, 72.0), (-3200, 2560));
-        assert_eq!(row(&layout, adjacent, 1200.0, 72.0), (-1920, 2560));
-        assert_eq!(row(&layout, main, 300.0, 72.0), (0, 2560));
-        assert_eq!(row(&layout, main, 1320.0, 72.0), (0, 2560));
+        assert_eq!(row(&layout, main, 500.0, 1.0), (-3200, 2560));
+        assert_eq!(row(&layout, adjacent, 1200.0, 1.0), (-1920, 2560));
+        assert_eq!(row(&layout, main, 300.0, 1.0), (0, 2560));
+        assert_eq!(row(&layout, main, 1320.0, 1.0), (0, 2560));
     }
 }
