@@ -1,7 +1,7 @@
 use crate::{
     i18n::{Language, text},
     motion::{Mode, Motion},
-    pigeon::{GROUND_Y, PigeonRenderer, SpriteView},
+    pigeon::{EDGE_MARGIN, GROUND_Y, PigeonRenderer, SpriteView},
 };
 use std::{
     cell::RefCell,
@@ -21,11 +21,15 @@ use windows::{
     core::{HSTRING, Interface, PCWSTR, Result, w},
 };
 
+mod screens;
 mod settings;
 mod size_slider;
 mod tray_icon;
+mod wrap;
+use screens::Screen;
 use settings::Settings;
 use tray_icon::TrayIcon;
+use wrap::{Region, WrapWindow};
 
 const CLASS: PCWSTR = w!("Pigeon.Native.Prototype");
 const BODY_CLASS: PCWSTR = w!("Pigeon.Native.Body");
@@ -41,7 +45,7 @@ enum Event {
     SystemSettings,
     TaskbarCreated,
     Size(u32),
-    Down(POINT),
+    Down(POINT, bool),
     Move(POINT),
     Up,
     Display,
@@ -67,8 +71,9 @@ unsafe extern "system" fn body_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             WM_LBUTTONDOWN => {
                 let mut pt = POINT::default();
                 let _ = GetCursorPos(&mut pt);
+                let wrapped = GetWindowLongPtrW(hwnd, GWLP_USERDATA) != 0;
                 SetCapture(hwnd);
-                enqueue(Event::Down(pt));
+                enqueue(Event::Down(pt, wrapped));
             }
             WM_MOUSEMOVE if wp.0 & 1 != 0 => {
                 let mut pt = POINT::default();
@@ -131,7 +136,7 @@ impl Drop for OwnedHandle {
 struct Graphics {
     context: ID2D1DeviceContext,
     swap: IDXGISwapChain1,
-    _composition: IDCompositionDevice,
+    composition: IDCompositionDevice,
     _target: IDCompositionTarget,
     _visual: IDCompositionVisual,
     _bitmap: ID2D1Bitmap1,
@@ -146,6 +151,21 @@ enum Presentation {
 }
 
 impl Graphics {
+    unsafe fn attach(
+        composition: &IDCompositionDevice,
+        swap: &IDXGISwapChain1,
+        hwnd: HWND,
+    ) -> Result<(IDCompositionTarget, IDCompositionVisual)> {
+        unsafe {
+            let target = composition.CreateTargetForHwnd(hwnd, true)?;
+            let visual = composition.CreateVisual()?;
+            visual.SetContent(swap)?;
+            target.SetRoot(&visual)?;
+            composition.Commit()?;
+            Ok((target, visual))
+        }
+    }
+
     unsafe fn new(hwnd: HWND, width: u32, height: u32) -> Result<Self> {
         unsafe {
             let mut device = None;
@@ -209,16 +229,12 @@ impl Graphics {
             context.SetTarget(&bitmap);
             context.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             let composition: IDCompositionDevice = DCompositionCreateDevice(&dxgi)?;
-            let target = composition.CreateTargetForHwnd(hwnd, true)?;
-            let visual = composition.CreateVisual()?;
-            visual.SetContent(&swap)?;
-            target.SetRoot(&visual)?;
-            composition.Commit()?;
+            let (target, visual) = Self::attach(&composition, &swap, hwnd)?;
             let pigeon = PigeonRenderer::new(&context)?;
             Ok(Self {
                 context,
                 swap,
-                _composition: composition,
+                composition,
                 _target: target,
                 _visual: visual,
                 _bitmap: bitmap,
@@ -230,13 +246,14 @@ impl Graphics {
 
     unsafe fn render(
         &mut self,
-        motion: &Motion,
-        scale: f32,
+        view: SpriteView,
         origin: (f32, f32),
         body: HWND,
+        wrapped_body: Option<HWND>,
+        clips: [Option<(i32, i32)>; 2],
+        height: i32,
     ) -> Result<Presentation> {
         unsafe {
-            let view = SpriteView::new(motion.sprite_clip(), motion.facing(), scale);
             if self.last_presented == Some((view, origin)) {
                 return Ok(Presentation::Unchanged);
             }
@@ -258,18 +275,18 @@ impl Graphics {
                 self.last_presented = None;
                 return Ok(Presentation::Unavailable);
             }
-            let region = self.pigeon.body_region(view, x, y)?;
-            if SetWindowRgn(body, Some(region), false) == 0 {
-                // Ownership transfers to Windows only on success.
-                let _ = DeleteObject(region.into());
-                return Err(windows::core::Error::new(
-                    E_FAIL,
-                    text(
-                        "Could not set the pigeon's input region",
-                        "无法设置鸽子的点击区域",
-                    ),
-                ));
+            let region = Region(self.pigeon.body_region(view, x, y)?);
+            if let Some(wrapped_body) = wrapped_body {
+                let wrapped = region.copy()?;
+                if let Some(clip) = clips[1] {
+                    wrapped.intersect(clip, height)?;
+                }
+                wrapped.set(wrapped_body)?;
             }
+            if let Some(clip) = clips[0] {
+                region.intersect(clip, height)?;
+            }
+            region.set(body)?;
             self.last_presented = Some((view, origin));
             Ok(Presentation::Submitted)
         }
@@ -355,16 +372,21 @@ impl Drop for Tray {
 struct App {
     hwnd: HWND,
     body: HWND,
+    wrap: Option<WrapWindow>,
     graphics: Graphics,
     tray: Tray,
     motion: Motion,
     base_scale: f32,
     settings: Settings,
     monitor_hz: Option<u32>,
-    work: RECT,
+    screens: Vec<Screen>,
+    screen: Screen,
+    row: (i32, i32),
     hidden: bool,
-    drag: Option<(POINT, f32, f32)>,
+    drag: Option<(POINT, (f32, f32))>,
     last_position: Option<(i32, i32)>,
+    wrapped_x: Option<i32>,
+    clips: [Option<(i32, i32)>; 2],
     offset: (f32, f32),
 }
 impl Drop for App {
@@ -389,34 +411,76 @@ impl App {
         self.base_scale * (self.settings.size_percent as f32 / 100.0)
     }
     fn bound_width(&self) -> f32 {
-        (((self.work.right - self.work.left) as f32 - WIDTH * self.base_scale) / self.scale())
-            .max(0.0)
+        (self.row.1 - self.row.0) as f32 / self.scale()
     }
     fn bound_height(&self) -> f32 {
-        (((self.work.bottom - self.work.top) as f32 - HEIGHT * self.base_scale) / self.scale())
-            .max(0.0)
+        ((self.screen.rect.bottom - 1) as f32 - self.screen.top(GROUND_Y * self.scale()))
+            / self.scale()
+    }
+    fn anchor(&self) -> (f32, f32) {
+        let scale = self.scale();
+        (
+            self.row.0 as f32 + self.motion.x() * scale,
+            self.screen.top(GROUND_Y * scale) + self.motion.ground() * scale,
+        )
+    }
+    fn place(&mut self, screen: Screen, (x, y): (f32, f32), wrap_x: bool) {
+        if self.screen.monitor != screen.monitor {
+            self.monitor_hz = screen.refresh_rate();
+        }
+        self.screen = screen;
+        let scale = self.scale();
+        let top = screen.top(GROUND_Y * scale);
+        let y = y.clamp(top, (screen.rect.bottom - 1) as f32);
+        self.row = screens::row(&self.screens, screen, y, GROUND_Y * scale);
+        let width = self.bound_width();
+        let x = (x - self.row.0 as f32) / scale;
+        self.motion.set_x(if wrap_x {
+            x.rem_euclid(width)
+        } else {
+            x.clamp(0.0, width)
+        });
+        self.motion
+            .set_ground((y - top) / scale, self.bound_height());
+    }
+    fn follow_screen(&mut self) {
+        if self.screens.len() == 1 {
+            return;
+        }
+        let (x, y) = self.anchor();
+        // While leaving the outer edge, keep using the display the bird is leaving or entering.
+        let probe = x.clamp(self.row.0 as f32, (self.row.1 - 1) as f32);
+        let top_margin = GROUND_Y * self.scale();
+        let screen = self
+            .screens
+            .iter()
+            .copied()
+            .find(|screen| {
+                screen.visible_at(y, top_margin)
+                    && probe >= screen.rect.left as f32
+                    && probe < screen.rect.right as f32
+            })
+            .unwrap_or(self.screen);
+        if screen.monitor != self.screen.monitor
+            || screens::row(&self.screens, screen, y, top_margin) != self.row
+        {
+            self.place(screen, (x, y), false);
+        }
     }
     fn center(&mut self) {
-        self.motion.set_x(self.bound_width() * 0.5);
-        let height = (self.work.bottom - self.work.top) as f32;
-        self.motion.set_ground(
-            (height * (2.0 / 3.0) - HEIGHT * self.base_scale * 0.5) / self.scale(),
-            self.bound_height(),
-        );
+        let rect = self.screen.rect;
+        let x = rect.left as f32 + (rect.right - rect.left) as f32 * 0.5;
+        let y = rect.top as f32 + (rect.bottom - rect.top) as f32 * (2.0 / 3.0);
+        self.place(self.screen, (x, y), false);
     }
     unsafe fn set_size(&mut self, percent: u32) -> Result<()> {
         let percent = percent.clamp(SIZE_MIN, SIZE_MAX);
         if percent == self.settings.size_percent {
             return Ok(());
         }
-        let old_scale = self.scale();
+        let anchor = self.anchor();
         self.settings.size_percent = percent;
-        // Motion distances are in bird units, so the feet travel one scaled stride.
-        let ratio = old_scale / self.scale();
-        self.motion
-            .set_x((self.motion.x() * ratio).clamp(0.0, self.bound_width()));
-        self.motion
-            .set_ground(self.motion.ground() * ratio, self.bound_height());
+        self.place(self.screen, anchor, false);
         unsafe {
             self.position()?;
             if !self.hidden && !self.settings.paused {
@@ -426,14 +490,27 @@ impl App {
         Ok(())
     }
     unsafe fn position(&mut self) -> Result<()> {
-        let (left, dx) = split_pixel(self.motion.x() * self.scale());
-        let (top, dy) = split_pixel(self.motion.ground() * self.scale());
-        let (x, y) = (self.work.left + left, self.work.top + top);
+        let (anchor_x, anchor_y) = self.anchor();
+        let (x, dx) = split_pixel(anchor_x - WIDTH * 0.5 * self.base_scale);
+        let (y, dy) = split_pixel(anchor_y - (145.0 + GROUND_Y) * self.base_scale);
         self.offset = (dx, dy);
+        let wrapped_x = wrap::other_x(anchor_x, EDGE_MARGIN * self.scale(), self.row, x);
         unsafe {
-            if self.last_position != Some((x, y)) {
-                let mut moves = BeginDeferWindowPos(2)?;
-                for hwnd in [self.hwnd, self.body] {
+            if wrapped_x.is_some() && self.wrap.is_none() {
+                self.wrap = Some(WrapWindow::new(self)?);
+            }
+            if wrapped_x.is_some() != self.wrapped_x.is_some() {
+                self.graphics.last_presented = None;
+            }
+            let wrapped = self.wrap.as_ref().zip(wrapped_x);
+            if self.last_position != Some((x, y)) || self.wrapped_x != wrapped_x {
+                let mut moves = BeginDeferWindowPos(if wrapped.is_some() { 4 } else { 2 })?;
+                let positions = [(self.hwnd, x), (self.body, x)].into_iter().chain(
+                    wrapped
+                        .into_iter()
+                        .flat_map(|(w, x)| [(w.hwnd, x), (w.body, x)]),
+                );
+                for (hwnd, x) in positions {
                     moves = DeferWindowPos(
                         moves,
                         hwnd,
@@ -448,6 +525,47 @@ impl App {
                 EndDeferWindowPos(moves)?;
                 self.last_position = Some((x, y));
             }
+            let disappeared = self.wrapped_x.is_some() && wrapped_x.is_none();
+            self.wrapped_x = wrapped_x;
+            if disappeared && let Some(wrapped) = &self.wrap {
+                let _ = ShowWindow(wrapped.hwnd, SW_HIDE);
+                if GetCapture() == wrapped.body {
+                    // Keep the capture through a drag that pulls this half fully onto the main side.
+                    Region::rectangle(0, 0, 0)?.set(wrapped.body)?;
+                } else {
+                    let _ = ShowWindow(wrapped.body, SW_HIDE);
+                }
+            }
+            // Windows clips to the physical screen automatically on a single display.
+            // On staggered displays, a wing can overhang the lane at a different height.
+            if self.screens.len() > 1 || self.clips != [None; 2] {
+                let width = (WIDTH * self.base_scale) as i32;
+                let height = (HEIGHT * self.base_scale) as i32;
+                let clips = if self.screens.len() > 1 {
+                    [
+                        wrap::clip_x(x, width, self.row),
+                        wrapped_x.and_then(|x| wrap::clip_x(x, width, self.row)),
+                    ]
+                } else {
+                    [None; 2]
+                };
+                for (index, hwnd) in [Some(self.hwnd), self.wrap.as_ref().map(|w| w.hwnd)]
+                    .into_iter()
+                    .enumerate()
+                {
+                    if let Some(hwnd) = hwnd
+                        && clips[index] != self.clips[index]
+                    {
+                        if let Some((left, right)) = clips[index] {
+                            Region::rectangle(left, right, height)?.set(hwnd)?;
+                        } else if SetWindowRgn(hwnd, None, false) == 0 {
+                            return Err(windows::core::Error::from_thread());
+                        }
+                        self.graphics.last_presented = None;
+                    }
+                }
+                self.clips = clips;
+            }
             if self.settings.paused && !self.hidden {
                 self.render()?;
             }
@@ -460,6 +578,27 @@ impl App {
                 && !self.settings.click_through
                 && self.graphics.last_presented.is_some();
             let _ = ShowWindow(self.body, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
+            if let Some(wrapped) = &self.wrap {
+                let visible = visible && (self.wrapped_x.is_some() || GetCapture() == wrapped.body);
+                let _ = ShowWindow(
+                    wrapped.body,
+                    if visible { SW_SHOWNOACTIVATE } else { SW_HIDE },
+                );
+            }
+        }
+    }
+    unsafe fn show_wrap(&self) {
+        unsafe {
+            if let Some(wrapped) = &self.wrap {
+                let visible = self.wrapped_x.is_some()
+                    && !self.hidden
+                    && self.graphics.last_presented.is_some();
+                let _ = ShowWindow(
+                    wrapped.hwnd,
+                    if visible { SW_SHOWNOACTIVATE } else { SW_HIDE },
+                );
+            }
+            self.show_body();
         }
     }
     unsafe fn render(&mut self) -> Result<Presentation> {
@@ -467,11 +606,18 @@ impl App {
             let first_frame = self.graphics.last_presented.is_none();
             let scale = self.scale();
             let origin = sprite_origin(self.base_scale, scale, self.offset);
-            let result = self
-                .graphics
-                .render(&self.motion, scale, origin, self.body)?;
+            let view = SpriteView::new(self.motion.sprite_clip(), self.motion.facing(), scale);
+            let wrapped_body = self.wrap.as_ref().zip(self.wrapped_x).map(|(w, _)| w.body);
+            let result = self.graphics.render(
+                view,
+                origin,
+                self.body,
+                wrapped_body,
+                self.clips,
+                (HEIGHT * self.base_scale) as i32,
+            )?;
             if first_frame && matches!(result, Presentation::Submitted) {
-                self.show_body();
+                self.show_wrap();
             }
             Ok(result)
         }
@@ -670,27 +816,6 @@ unsafe fn add_item(menu: HMENU, id: usize, label: &str, checked: bool) -> Result
     }
 }
 
-unsafe fn monitor_settings(hwnd: HWND) -> Result<(RECT, Option<u32>)> {
-    unsafe {
-        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-        let mut info = MONITORINFOEXW::default();
-        info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
-        GetMonitorInfoW(monitor, &mut info.monitorInfo).ok()?;
-        let mut mode = DEVMODEW {
-            dmSize: size_of::<DEVMODEW>() as u16,
-            ..Default::default()
-        };
-        let valid = EnumDisplaySettingsW(
-            PCWSTR(info.szDevice.as_ptr()),
-            ENUM_CURRENT_SETTINGS,
-            &mut mode,
-        )
-        .as_bool();
-        let hz = (valid && mode.dmDisplayFrequency > 1).then_some(mode.dmDisplayFrequency);
-        Ok((info.monitorInfo.rcWork, hz))
-    }
-}
-
 // Windows positions popups on whole pixels. Draw the remaining fraction inside both windows.
 fn split_pixel(value: f32) -> (i32, f32) {
     let pixel = value.round();
@@ -714,7 +839,7 @@ fn frame_rates(preference: Option<u32>, monitor_hz: Option<u32>) -> (u32, u32) {
     (limit, monitor_hz.unwrap_or(limit).min(limit))
 }
 
-unsafe fn fullscreen_on_monitor(hwnd: HWND) -> bool {
+unsafe fn fullscreen_on_monitor(hwnd: HWND, screen: Screen) -> bool {
     unsafe {
         let foreground = GetForegroundWindow();
         if foreground == hwnd || foreground.0.is_null() {
@@ -729,24 +854,17 @@ unsafe fn fullscreen_on_monitor(hwnd: HWND) -> bool {
         ) {
             return false;
         }
-        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-        if MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST) != monitor {
+        if MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST) != screen.monitor {
             return false;
         }
-        let mut info = MONITORINFO {
-            cbSize: size_of::<MONITORINFO>() as u32,
-            ..Default::default()
-        };
         let mut rect = RECT::default();
-        if !GetMonitorInfoW(monitor, &mut info).as_bool()
-            || GetWindowRect(foreground, &mut rect).is_err()
-        {
+        if GetWindowRect(foreground, &mut rect).is_err() {
             return false;
         }
-        rect.left <= info.rcMonitor.left + 1
-            && rect.top <= info.rcMonitor.top + 1
-            && rect.right >= info.rcMonitor.right - 1
-            && rect.bottom >= info.rcMonitor.bottom - 1
+        rect.left <= screen.rect.left + 1
+            && rect.top <= screen.rect.top + 1
+            && rect.right >= screen.rect.right - 1
+            && rect.bottom >= screen.rect.bottom - 1
     }
 }
 
@@ -836,7 +954,8 @@ unsafe fn run_inner() -> Result<()> {
                 return Err(error);
             }
         };
-        let (work, monitor_hz) = monitor_settings(hwnd)?;
+        let screens = screens::connected()?;
+        let screen = screens::nearest(&screens, POINT::default());
         // A surface-less owned window receives input without clipping the drawn feathers.
         let body = CreateWindowExW(
             WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
@@ -856,21 +975,27 @@ unsafe fn run_inner() -> Result<()> {
             settings.fps = Some(144);
         }
         let mut motion = Motion::new();
+        motion.wrap_at_edges(EDGE_MARGIN);
         motion.set_mode(if inspect { Mode::Rest } else { settings.mode });
         motion.set_speed(settings.speed);
         let mut app = App {
             hwnd,
             body,
+            wrap: None,
             graphics,
             tray,
             motion,
             base_scale: scale,
             settings,
-            work,
-            monitor_hz,
-            hidden: settings.fullscreen && fullscreen_on_monitor(hwnd),
+            screens,
+            screen,
+            row: (screen.rect.left, screen.rect.right),
+            monitor_hz: screen.refresh_rate(),
+            hidden: settings.fullscreen && fullscreen_on_monitor(hwnd, screen),
             drag: None,
             last_position: None,
+            wrapped_x: None,
+            clips: [None; 2],
             offset: (0.0, 0.0),
         };
         app.center();
@@ -950,32 +1075,42 @@ unsafe fn run_inner() -> Result<()> {
                         let _ = app.tray.register();
                         app.tray.refresh_icon();
                     }
-                    Event::Down(pt) => app.drag = Some((pt, app.motion.x(), app.motion.ground())),
+                    Event::Down(pt, wrapped) => {
+                        let mut anchor = app.anchor();
+                        if wrapped
+                            && let (Some(x), Some((main, _))) = (app.wrapped_x, app.last_position)
+                        {
+                            anchor.0 += (x - main) as f32;
+                        }
+                        app.drag = Some((pt, anchor));
+                    }
                     Event::Move(pt) => {
-                        if let Some((start, x, y)) = app.drag {
-                            app.motion.set_x(
-                                (x + (pt.x - start.x) as f32 / app.scale())
-                                    .clamp(0.0, app.bound_width()),
-                            );
-                            app.motion.set_ground(
-                                y + (pt.y - start.y) as f32 / app.scale(),
-                                app.bound_height(),
+                        if let Some((start, (x, y))) = app.drag {
+                            let screen = screens::nearest(&app.screens, pt);
+                            app.place(
+                                screen,
+                                (x + (pt.x - start.x) as f32, y + (pt.y - start.y) as f32),
+                                true,
                             );
                             app.position()?;
                         }
                     }
-                    Event::Up => app.drag = None,
+                    Event::Up => {
+                        app.drag = None;
+                        app.show_body();
+                    }
                     Event::Display => {
                         app.tray.refresh_icon();
                         app.graphics.last_presented = None;
-                        let old_top = app.work.top;
-                        (app.work, app.monitor_hz) = monitor_settings(hwnd)?;
-                        app.motion
-                            .set_x(app.motion.x().clamp(0.0, app.bound_width()));
-                        app.motion.set_ground(
-                            app.motion.ground() + (old_top - app.work.top) as f32 / app.scale(),
-                            app.bound_height(),
-                        );
+                        let anchor = app.anchor();
+                        app.screens = screens::connected()?;
+                        let point = POINT {
+                            x: anchor.0.round() as i32,
+                            y: anchor.1.round() as i32,
+                        };
+                        let screen = screens::nearest(&app.screens, point);
+                        app.place(screen, anchor, false);
+                        app.monitor_hz = screen.refresh_rate();
                         app.position()?;
                     }
                 }
@@ -1007,12 +1142,12 @@ unsafe fn run_inner() -> Result<()> {
                 break;
             }
             if now.duration_since(environment) >= Duration::from_millis(500) {
-                let hidden = app.settings.fullscreen && fullscreen_on_monitor(hwnd);
+                let hidden = app.settings.fullscreen && fullscreen_on_monitor(hwnd, app.screen);
                 if hidden != app.hidden {
                     app.hidden = hidden;
                     app.graphics.last_presented = None;
                     let _ = ShowWindow(hwnd, if hidden { SW_HIDE } else { SW_SHOWNOACTIVATE });
-                    app.show_body();
+                    app.show_wrap();
                 }
                 environment = now;
             }
@@ -1061,6 +1196,7 @@ unsafe fn run_inner() -> Result<()> {
                 if !app.hidden && (!app.settings.paused || app.graphics.last_presented.is_none()) {
                     if !app.settings.paused && app.drag.is_none() {
                         app.motion.update(dt.min(0.1), app.bound_width());
+                        app.follow_screen();
                         app.position()?;
                     }
                     ticks += 1;

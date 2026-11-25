@@ -158,6 +158,7 @@ pub struct Motion {
     auto_roll: u32,
     x: f32,
     width: f32,
+    wrap_margin: f32,
     ground: f32,
     max_ground: f32,
     roam: Roam,
@@ -196,6 +197,7 @@ impl Motion {
             auto_roll: seed,
             x: 0.0,
             width: 0.0,
+            wrap_margin: 0.0,
             ground: 0.0,
             max_ground: 0.0,
             patch: None,
@@ -315,6 +317,7 @@ impl Motion {
     }
 
     fn plan_walk(&mut self, can_turn: bool, animate_turn: bool) {
+        let can_turn = can_turn && !self.crossing_edge();
         let step = STRIDE * 0.5;
         let mut direction = self.facing;
         if can_turn && self.width >= step {
@@ -345,7 +348,8 @@ impl Motion {
             } else {
                 self.x
             };
-            let approach = (step * (1.2 + 6.0 * self.draw())).min(ahead);
+            let approach =
+                (step * (1.2 + 6.0 * self.draw())).min((ahead - self.wrap_margin).max(0.0));
             let grade = (2.0 * self.draw() - 1.0) * 0.16;
             self.patch = Some(FoodPatch {
                 x: self.x + direction * (approach + BILL_REACH),
@@ -389,7 +393,11 @@ impl Motion {
             || 1.0 + (units * self.draw().powi(2)).floor(),
             |distance| ((distance + since_landing) / STRIDE).round().max(1.0),
         );
-        let cycles = planned.min(((available + since_landing) / STRIDE).floor());
+        let cycles = if self.wrap_margin > 0.0 {
+            planned
+        } else {
+            planned.min(((available + since_landing) / STRIDE).floor())
+        };
         let length = (cycles * STRIDE - since_landing).max(0.0);
         let grade = self.draw() * 2.0 - 1.0;
         let grade = if !stalk && grade.abs() > 0.75 {
@@ -433,8 +441,8 @@ impl Motion {
             }
             let traveled = self.roam.length - self.roam.remaining;
             if self.width < STRIDE
-                || self.roam.remaining <= STRIDE * 0.02
-                || self.approaching_edge()
+                || (self.roam.remaining <= STRIDE * 0.02 && !self.crossing_edge())
+                || (self.wrap_margin == 0.0 && self.approaching_edge())
             {
                 let pick = self.draw();
                 self.roam.next =
@@ -502,6 +510,18 @@ impl Motion {
             self.x
         };
         self.width > 0.0 && ahead <= (STRIDE * 0.55).min(self.width * 0.3)
+    }
+
+    fn crossing_edge(&self) -> bool {
+        let margin = self.wrap_margin;
+        margin > 0.0
+            && (self.x < margin
+                || self.x > self.width - margin
+                || if self.facing > 0.0 {
+                    self.width - self.x <= margin + STRIDE
+                } else {
+                    self.x <= margin + STRIDE
+                })
     }
 
     fn can_leave_action(&self) -> bool {
@@ -635,6 +655,11 @@ impl Motion {
         }
     }
 
+    #[cfg(any(windows, test))]
+    pub fn wrap_at_edges(&mut self, margin: f32) {
+        self.wrap_margin = margin;
+    }
+
     pub fn update(&mut self, dt: f32, bounds_width: f32) {
         if bounds_width < self.width {
             self.patch = None;
@@ -716,7 +741,8 @@ impl Motion {
         let pace = if roaming { self.roam.pace } else { 1.0 };
         let mut distance = WALK_SPEED * self.walk_weight * clip_step * pace;
         let to_landing = (STANDING_PHASE - self.phase).rem_euclid(1.0) * STRIDE;
-        let arriving = roaming && self.roam.remaining <= distance + STRIDE * 0.02;
+        let arriving =
+            roaming && self.roam.remaining <= distance + STRIDE * 0.02 && !self.crossing_edge();
         let stop_here = cfg!(feature = "painted")
             && self.action == Mode::Walk
             && (requested != Mode::Walk || arriving)
@@ -741,7 +767,19 @@ impl Motion {
             (self.phase + distance / STRIDE).fract()
         };
         if self.width > 0.0 {
-            self.x = (self.x + distance * self.facing).clamp(0.0, self.width);
+            let next = self.x + distance * self.facing;
+            if self.wrap_margin > 0.0 {
+                if next < 0.0 || next >= self.width {
+                    self.x = next.rem_euclid(self.width);
+                    if self.patch.is_some() {
+                        self.leave_patch();
+                    }
+                } else {
+                    self.x = next;
+                }
+                return;
+            }
+            self.x = next.clamp(0.0, self.width);
             // Auto birds settle before turning; continuous manual walking reflects at the boundary.
             if !matches!(self.mode, Mode::Auto | Mode::Rest) {
                 if self.x >= self.width {
@@ -920,6 +958,55 @@ fn look_return_time(time: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn walking_wraps_in_both_directions_without_resetting_the_stride() {
+        let width = 900.0;
+        for facing in [-1.0, 1.0] {
+            let mut motion = Motion::with_seed(0);
+            motion.wrap_at_edges(107.0);
+            motion.set_mode(Mode::Walk);
+            motion.facing = facing;
+            motion.walk_weight = 1.0;
+            motion.set_ground(193.5, 600.0);
+            let x = if facing < 0.0 { 0.125 } else { width - 0.125 };
+            motion.set_x(x);
+            let phase = motion.phase;
+            motion.update(1.0 / 240.0, width);
+            let distance = WALK_SPEED / 240.0;
+            assert!((motion.x() - (x + facing * distance).rem_euclid(width)).abs() < 0.001);
+            assert_eq!(motion.facing(), facing);
+            assert_eq!(motion.ground(), 193.5);
+            assert!((motion.phase - (phase + distance / STRIDE).fract()).abs() < 0.001);
+        }
+    }
+
+    #[cfg(feature = "painted")]
+    #[test]
+    fn automatic_walk_finishes_an_edge_crossing_before_stopping() {
+        let (width, margin) = (1200.0, 107.0);
+        for seed in 0..8 {
+            for facing in [-1.0, 1.0] {
+                let mut motion = Motion::with_seed(seed);
+                motion.wrap_at_edges(margin);
+                motion.facing = facing;
+                motion.set_x(if facing < 0.0 { margin } else { width - margin });
+                motion.set_ground(220.0, 500.0);
+                let mut wrapped = false;
+                for _ in 0..600 {
+                    let previous = motion.x();
+                    motion.update(1.0 / 120.0, width);
+                    assert_eq!(motion.facing(), facing);
+                    assert_eq!(motion.sprite_clip().0, "walk");
+                    wrapped |= (previous - motion.x()).abs() > width / 2.0;
+                    if wrapped && (margin..=width - margin).contains(&motion.x()) {
+                        break;
+                    }
+                }
+                assert!(wrapped && (margin..=width - margin).contains(&motion.x()));
+            }
+        }
+    }
 
     fn walking() -> Motion {
         let mut motion = Motion::new();

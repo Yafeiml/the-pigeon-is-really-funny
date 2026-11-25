@@ -38,6 +38,8 @@ const FRAME_HEIGHT: u32 = 408;
 const FRAME_PITCH: u32 = FRAME_WIDTH * 4;
 const FRAME_BYTES: usize = (FRAME_PITCH * FRAME_HEIGHT) as usize;
 pub(crate) const GROUND_Y: f32 = 72.0;
+// The opaque artwork reaches at most 106 sprite units from the pivot, including mirroring.
+pub(crate) const EDGE_MARGIN: f32 = 107.0;
 // The 2x image covers native coordinates (24,40)-(280,244) around the (160,145) anchor.
 const DESTINATION: D2D_RECT_F = D2D_RECT_F {
     left: -136.0,

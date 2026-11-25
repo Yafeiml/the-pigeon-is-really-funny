@@ -14,6 +14,7 @@ Save `Pigeon-Windows-x64.exe` in a folder you can write to and double-click it o
 
 - Drag the bird to move it. Right-click its body or the tray icon to open the menu. Under **Language**, choose **Follow Windows**, **English** or **简体中文**. The choice applies immediately and is saved. With **Follow Windows**, Chinese display languages use Simplified Chinese and all other languages use English.
 - Choose **Free roam** to explore or **Rest in place** to look around and peck. Set size from 50–100% or choose 1×, 1.5× or 2× speed.
+- Drag the pigeon right up to the screen edges. While roaming it walks across adjacent displays where their edges meet at its height. At the outer edge, the part that crosses the edge immediately appears on the opposite side.
 - Turn on **Launch at sign-in** to start the pigeon when you sign in to Windows. It is off by default. If you move or rename the EXE, enable it again from the new location. Opening the EXE again leaves the existing pigeon running.
 - Set a 60, 120 or 144 FPS cap. The display refresh rate limits the effective frame rate. Full-screen hiding and click-through are available from the same menu.
 - Your preferences are saved in `%LOCALAPPDATA%\DesktopPigeon\settings.ini`. If you used the folder-based prototype, exit it from the tray before launching this release. Your preferences carry over.
